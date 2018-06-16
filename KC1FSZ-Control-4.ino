@@ -21,6 +21,7 @@
 #include <ClickDetector.h>
 #include <Utils.h>
 #include <VSWRMeterState.h>
+#include <IntervalTimer2.h>
 
 // This is used to determine whether the EEPROM storage is valid
 #define MAGIC_NUMBER 2828
@@ -89,10 +90,8 @@ uint8_t bfoPower = 0;
 // Scanning related.
 
 bool scanMode = false;
-// This is the last time we made a scan jump
-unsigned long lastScanStamp = 0;
 // This controls how fast we scan
-unsigned long scanDelayMs = 150;
+IntervalTimer2 scanInterval(150);
 
 // AF Gain Related
 
@@ -100,10 +99,8 @@ unsigned long scanDelayMs = 150;
 unsigned int AFGain = 0;
 // The last value sent to the gain control.  Used to determine if a change has happened.
 unsigned int previousAFGain = 0;
-// The last time the control was seen to have changed.  Used to control timeout of volume mode.
-unsigned long lastAFGainChangeStamp = 0;
-// This is how long we stay in volumne mode after the control is touched
-unsigned long AFGainChangeTimeoutMs = 2000;
+// Used to control the display of the volume setting
+IntervalTimer2 AFGainChangeTimeout(2000UL);
 
 // T/R control related
 bool transmitMode = false;
@@ -159,7 +156,7 @@ void spiWrite(int ssPin,int mosiPin,int clkPin,int address, int value) {
 
 // ----- Display -----------------------------------------------------------------------
 
-void updateDisplay1() {
+void updateDisplayReceive1() {
 
   int startX = 10;
   int y = 17;
@@ -223,6 +220,29 @@ void updateDisplay1() {
   }
 }
 
+void updateDisplayTransmit1() {
+
+  display.setTextColor(WHITE);
+
+  int y = 17;
+
+  display.setTextSize(0);
+  display.setCursor(0,y);
+  display.print("VSWR");
+
+  display.setTextSize(2);
+  display.setCursor(20,y);
+  display.print(vswrState.getVswr());
+
+  display.setTextSize(0);
+  display.setCursor(0,y + 12);
+  display.print("Power");
+
+  display.setTextSize(2);
+  display.setCursor(20,y + 12);
+  display.print(vswrState.getPwrFwd());
+}
+
 void updateDisplay() {
 
   // Logo information and line
@@ -237,7 +257,11 @@ void updateDisplay() {
   display.setCursor(modeX,0);
   display.print(modeTitles[(int)mode]);
 
-  updateDisplay1();
+  if (transmitMode) {
+    updateDisplayTransmit1();
+  } else {
+    updateDisplayReceive1();
+  }
 }
 
 // ----- AF Gain Control -------------------------------------------------------------------------
@@ -427,6 +451,8 @@ void loop() {
   else if (commandButton0.getState() && commandButton0.isEdge()) {
     if (mode == VFO) {
       scanMode = !scanMode;     
+      // Start the timer
+      scanInterval.start(now);
     }
   } 
   // Look for changes to the volume knob
@@ -436,27 +462,22 @@ void loop() {
     AFGain = AFGainControlSample;
     previousAFGain = AFGain;
     updateAFGain();
-    lastAFGainChangeStamp = now;
+    AFGainChangeTimeout.start(now);
   }
   // Look for PTT action
   else if (pttButton.isEdge()) {
-   transmitMode = commandButton0.getState();
-   displayDirty = true;   
-   if (transmitMode) {
-    digitalWrite(TR_RELAY_PIN,HIGH); 
-   } else {
-    digitalWrite(TR_RELAY_PIN,LOW);
-   }
+    // Immediately stop scanning
+    scanMode = false;    
+    // Read the PTT button
+    transmitMode = pttButton.getState();
+    // Activate the relays accordingly
+    digitalWrite(TR_RELAY_PIN,(transmitMode) ? HIGH : LOW); 
   }
  
   // Handle scanning.  If we are in VFO mode and scanning is enabled and the scan interval
   // has expired then step the VFO frequency.
   //  
-  if (mode == VFO && 
-      scanMode && 
-      now > (lastScanStamp + scanDelayMs)) {
-    // Record the time so that we can start another cycle
-    lastScanStamp = now;
+  if (mode == VFO && scanMode && scanInterval.isExpired(now)) {
     // Bump the frequency by the configured step
     long step = stepMenu[stepIndex];
     vfoFreq += step;
@@ -466,11 +487,12 @@ void loop() {
     }
     updateVFOFreq();
     displayDirty = true;
+    // Start the timer again
+    scanInterval.start(now);
   }
 
   // Handle timeout of volume control
-  if (mode == VOL &&
-      now - lastAFGainChangeStamp > AFGainChangeTimeoutMs) {
+  if (mode == VOL && AFGainChangeTimeout.isExpired(now)) {
     mode = savedMode;
   }
 
