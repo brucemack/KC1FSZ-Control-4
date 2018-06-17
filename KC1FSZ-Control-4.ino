@@ -1,9 +1,7 @@
 // Control board for the Peppermint II SSB Tranceiver
 // Bruce MacKinnon KC1FSZ
-// 13-June-2018
+// 16-June-2018
 // 
-// I/O Pin Setup
-//
 #include <SPI.h>
 #include <Wire.h>
 #include <EEPROM.h>
@@ -15,7 +13,6 @@
 // The Etherkit library used to control the Si5351/a
 #include <si5351.h>
 
-// Utilities used to manage switches, ecoders, etc.
 #include <DebouncedSwitch2.h>
 #include <RotaryEncoder.h>
 #include <ClickDetector.h>
@@ -57,7 +54,7 @@ Si5351 si5351;
 
 enum Mode { VFO = 0, VFO_OFFSET, BFO, CAL, VFO_POWER, BFO_POWER, VOL };
 const char* modeTitles[] = { "VFO", "VFO+", "BFO", "CAL", "VFOPwr", "BFOPwr", "VOL" };
-const uint8_t modeCount = 7;
+//const uint8_t modeCount = 7;
 Mode mode = VFO;
 Mode savedMode = VFO;
 
@@ -437,6 +434,8 @@ void loop() {
       mode = VFO_POWER;
     } else if (mode == VFO_POWER) {
       mode = BFO_POWER;
+    } else if (mode == BFO_POWER) {
+      mode = VOL;
     } else {
       mode = VFO;
     } 
@@ -496,8 +495,8 @@ void loop() {
     mode = savedMode;
   }
 
-  // Sample data for VSWR meter
   if (transmitMode) {
+    // Sample data for VSWR meter
     vswrState.sampleIfNecessary(now);
     if (vswrState.isOutputReady()) {
       displayDirty = true;
