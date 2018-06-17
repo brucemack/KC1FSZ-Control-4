@@ -13,6 +13,7 @@
 // The Etherkit library used to control the Si5351/a
 #include <si5351.h>
 
+// KC1FSZ utilities
 #include <DebouncedSwitch2.h>
 #include <RotaryEncoder.h>
 #include <ClickDetector.h>
@@ -21,7 +22,7 @@
 #include <IntervalTimer2.h>
 
 // This is used to determine whether the EEPROM storage is valid
-#define MAGIC_NUMBER 2828
+#define MAGIC_NUMBER 2727
 
 Adafruit_SSD1306 display(4);
 
@@ -45,21 +46,20 @@ Si5351 si5351;
 #define TR_RELAY_PIN            11
 
 // Volume control input
-#define AFGAIN_PIN              A0 // NOTE: This is pin 14
+#define AFGAIN_PIN              A0 // (pin 14)
 // VSWR meter inputs 
-#define VSWR_FWD_PIN            A1
-#define VSWR_REV_PIN            A2
+#define VSWR_FWD_PIN            A1 // (pin 15)
+#define VSWR_REV_PIN            A2 // (pin 16)
 //
 // ----------------------------------------------------------------------------------------------
 
 enum Mode { VFO = 0, VFO_OFFSET, BFO, CAL, VFO_POWER, BFO_POWER, VOL };
 const char* modeTitles[] = { "VFO", "VFO+", "BFO", "CAL", "VFOPwr", "BFOPwr", "VOL" };
-//const uint8_t modeCount = 7;
 Mode mode = VFO;
 Mode savedMode = VFO;
 
-const unsigned long stepMenu[] = { 500, 100, 10, 1, 1000000, 100000, 10000, 1000 };
-const char* stepMenuTitles[] = { "500 Hz", "100 Hz", "10 Hz", "1 Hz", "1 MHz", "100 kHz", "10 kHz", "1 kHz" };
+const unsigned long steps[] = { 500, 100, 10, 1, 1000000, 100000, 10000, 1000 };
+const char* stepTitles[] = { "500 Hz", "100 Hz", "10 Hz", "1 Hz", "1 MHz", "100 kHz", "10 kHz", "1 kHz" };
 const uint8_t maxStepIndex = 7;
 
 // 40m band limitations used for scanning (phone portion only)
@@ -85,7 +85,6 @@ uint8_t vfoPower = 0;
 uint8_t bfoPower = 0;
 
 // Scanning related.
-
 bool scanMode = false;
 // This controls how fast we scan
 IntervalTimer2 scanInterval(150);
@@ -105,6 +104,8 @@ DebouncedSwitch2 pttButton(10L);
 
 // VSWR meter related
 VSWRMeterState vswrState(VSWR_FWD_PIN,VSWR_REV_PIN);
+// This controls how oftehn we refresh the display
+IntervalTimer2 vswrDisplayInterval(1000);
 
 unsigned long getMH(unsigned long f) {
   return f / 1000000L;
@@ -213,7 +214,7 @@ void updateDisplayReceive1() {
   if (mode == VFO || mode == VFO_OFFSET || mode == BFO || mode == CAL) {
     display.setTextSize(0);
     display.setCursor(startX,55);
-    display.print(stepMenuTitles[stepIndex]);
+    display.print(stepTitles[stepIndex]);
   }
 }
 
@@ -227,17 +228,21 @@ void updateDisplayTransmit1() {
   display.setCursor(0,y);
   display.print("VSWR");
 
-  display.setTextSize(2);
-  display.setCursor(20,y);
-  display.print(vswrState.getVswr());
-
+  if (vswrState.isOutputValid()) {
+    display.setTextSize(2);
+    display.setCursor(20,y);
+    display.print(vswrState.getVswr());
+  }
+  
   display.setTextSize(0);
   display.setCursor(0,y + 12);
   display.print("Power");
 
-  display.setTextSize(2);
-  display.setCursor(20,y + 12);
-  display.print(vswrState.getPwrFwd());
+  if (vswrState.isOutputValid()) {
+    display.setTextSize(2);
+    display.setCursor(20,y + 12);
+    display.print(vswrState.getPwrFwd());
+  }
 }
 
 void updateDisplay() {
@@ -383,7 +388,7 @@ void loop() {
     // Immediately stop scanning
     scanMode = false;
     // Handle dial
-    long step = mult * stepMenu[stepIndex];
+    long step = mult * steps[stepIndex];
     if (mode == VFO) {
       vfoFreq += step;
       updateVFOFreq();
@@ -422,8 +427,14 @@ void loop() {
     EEPROM.write(20,stepIndex);
     EEPROM.write(21,vfoPower);
     EEPROM.write(22,bfoPower);
+  } else if (clickDuration > 0) {
+    if (++stepIndex > maxStepIndex) {
+      stepIndex = 0;
+    } 
+    displayDirty = true;
   }
-  else if (clickDuration > 500) {
+  // Look for presses on the control button
+  else if (commandButton1.getState() && commandButton1.isEdge()) {
     if (mode == VFO) {
       mode = VFO_OFFSET;
     } else if (mode == VFO_OFFSET) {
@@ -439,15 +450,8 @@ void loop() {
     } else {
       mode = VFO;
     } 
-    displayDirty = true;
-  } else if (clickDuration > 0) {
-    if (++stepIndex > maxStepIndex) {
-      stepIndex = 0;
-    } 
-    displayDirty = true;
-  }
-  // Look for presses on the control button
-  else if (commandButton0.getState() && commandButton0.isEdge()) {
+    displayDirty = true;    
+  } else if (commandButton0.getState() && commandButton0.isEdge()) {
     if (mode == VFO) {
       scanMode = !scanMode;     
       // Start the timer
@@ -462,6 +466,7 @@ void loop() {
     previousAFGain = AFGain;
     updateAFGain();
     AFGainChangeTimeout.start(now);
+    displayDirty = true;    
   }
   // Look for PTT action
   else if (pttButton.isEdge()) {
@@ -471,34 +476,38 @@ void loop() {
     transmitMode = pttButton.getState();
     // Activate the relays accordingly
     digitalWrite(TR_RELAY_PIN,(transmitMode) ? HIGH : LOW); 
+    // Get ready to start displaying VSWR
+    vswrState.clear();
+    vswrDisplayInterval.start(now);
   }
  
   // Handle scanning.  If we are in VFO mode and scanning is enabled and the scan interval
   // has expired then step the VFO frequency.
   //  
   if (mode == VFO && scanMode && scanInterval.isExpired(now)) {
-    // Bump the frequency by the configured step
-    long step = stepMenu[stepIndex];
-    vfoFreq += step;
+    // Bump the frequency by the configured step amount
+    vfoFreq += steps[stepIndex];
     // Look for wrap-around
     if (vfoFreq > maxDisplayFreq) {
       vfoFreq = minDisplayFreq;
     }
     updateVFOFreq();
     displayDirty = true;
-    // Start the timer again
+    // Start the timer to prepare for the next step
     scanInterval.start(now);
   }
 
   // Handle timeout of volume control
   if (mode == VOL && AFGainChangeTimeout.isExpired(now)) {
     mode = savedMode;
+    displayDirty = true;
   }
 
+  // Sample data for VSWR meter and determine if a display update is needed
   if (transmitMode) {
-    // Sample data for VSWR meter
     vswrState.sampleIfNecessary(now);
-    if (vswrState.isOutputReady()) {
+    if (vswrDisplayInterval.isExpired(now)) {
+      vswrDisplayInterval.start(now);
       displayDirty = true;
     }
   }  
