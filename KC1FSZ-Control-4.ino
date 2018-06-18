@@ -20,6 +20,7 @@
 #include <Utils.h>
 #include <VSWRMeterState.h>
 #include <IntervalTimer2.h>
+#include <Averager.h>
 
 // This is used to determine whether the EEPROM storage is valid
 #define MAGIC_NUMBER 2727
@@ -93,8 +94,14 @@ IntervalTimer2 scanInterval(150);
 
 // The current value of the gain (0-127).  What is written to the digital pot.
 unsigned int AFGain = 0;
-// The last value sent to the gain control.  Used to determine if a change has happened.
-unsigned int previousAFGain = 0;
+// The number of steps the gain control can make
+const unsigned int AFGainSteps = 32;
+// The last value read from the gain control. Used to determine if a change has happened.
+int previousAFGainControlSample = 0;
+// Used for averaging the gain control value (LPF)
+int AFGainSamples[32];
+Averager AFGainAverager(AFGainSamples,32);
+
 // Used to control the display of the volume setting
 IntervalTimer2 AFGainChangeTimeout(2000UL);
 
@@ -268,15 +275,9 @@ void updateDisplay() {
 
 // ----- AF Gain Control -------------------------------------------------------------------------
 
-unsigned int readAFGainControl() {
-  // Gain control is read from an 12 bit A/D (1024).  Digial pot has 7 bit resolution (128).
-  // So we divide the reading by 8.  
-  return analogRead(AFGAIN_PIN) / 8;
-}
-
 void updateAFGain() {
   // Address 0x00 on the MCP4131 is the potentiometer value. 
-  spiWrite(AFGAIN_SS_PIN,SPI_MOSI_PIN,SPI_CLK_PIN,0,AFGain);
+  spiWrite(AFGAIN_SS_PIN,SPI_MOSI_PIN,SPI_CLK_PIN,0,(AFGain * 128) / AFGainSteps);
 }
 
 // ----- Si5351 Controls -------------------------------------------------------------------------
@@ -312,7 +313,7 @@ void setup() {
   pinMode(ENCODER0_PHASE1_PIN,INPUT_PULLUP);
   pinMode(ENCODER0_PUSH_PIN,INPUT_PULLUP);
   pinMode(COMMAND_BUTTON0_PIN,INPUT_PULLUP);
-  pinMode(COMMAND_BUTTON0_PIN,INPUT_PULLUP);
+  pinMode(COMMAND_BUTTON1_PIN,INPUT_PULLUP);
   pinMode(AFGAIN_SS_PIN,OUTPUT);
   digitalWrite(AFGAIN_SS_PIN,HIGH);
   pinMode(SPI_MOSI_PIN,OUTPUT);
@@ -357,7 +358,10 @@ void setup() {
   updateBFOPower();
   updateCal();
 
-  // Initial update of AF Gain
+  // Initial update of AF Gain based on the setting of the control
+  previousAFGainControlSample = analogRead(AFGAIN_PIN);
+  // Scale down to the desired number of steps 
+  AFGain = previousAFGainControlSample / AFGainSteps;  
   updateAFGain();
 
   // Initial display render
@@ -379,7 +383,11 @@ void loop() {
   pttButton.loadSample(digitalRead(PTT_BUTTON_PIN) == 0);
   long mult = vfoEnc.getIncrement();
   long clickDuration = vfoClick.getClickDuration();
-  unsigned int AFGainControlSample = readAFGainControl();
+  
+  // Read the volume knob, inclusive of scaling, etc.  Gain control is read from an 10 bit 
+  // A/D (1024).  The digial pot has 7 bit resolution (128).
+  AFGainAverager.sample(analogRead(AFGAIN_PIN));
+  int AFGainControlSample = AFGainAverager.getAverage();
   
   boolean displayDirty = false;
 
@@ -458,12 +466,16 @@ void loop() {
       scanInterval.start(now);
     }
   } 
-  // Look for changes to the volume knob
-  else if (AFGainControlSample != previousAFGain) {
-    savedMode = mode;
+  // Look for changes to the volume knob that are significant.
+  else if (abs(AFGainControlSample - previousAFGainControlSample) > (1024/32)) {
+    if (mode != VOL) {
+      savedMode = mode;
+    }
     mode = VOL;
-    AFGain = AFGainControlSample;
-    previousAFGain = AFGain;
+    // Latch the value for comparison with the next one
+    previousAFGainControlSample = AFGainControlSample;
+    // Scal down to the desired number of steps
+    AFGain = AFGainControlSample / AFGainSteps;
     updateAFGain();
     AFGainChangeTimeout.start(now);
     displayDirty = true;    
